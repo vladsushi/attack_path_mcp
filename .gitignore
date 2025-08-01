@@ -1,0 +1,17 @@
+*.pem
+chat-*.md
+diff.md
+__pycache__
+.ipynb_checkpoints
+.env
+*.pdf
+.chroma/*
+*.log
+*.diff
+.vscode/
+*.cs
+.aider*
+temp/*
+.DS_Store
+.coverage
+.ipynb
