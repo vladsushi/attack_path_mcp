@@ -38,7 +38,6 @@ class SignalRAttackPathClient:
         try:
             # Build the connection URL with access token as query parameter
             connection_url = f"{self.hub_url}?access_token={self.access_token}"
-            print(f"Connecting to: {connection_url}")
             
             # Build the connection with authentication
             self.connection = HubConnectionBuilder() \
@@ -57,7 +56,6 @@ class SignalRAttackPathClient:
             self.connection.on_close(self._on_disconnected)
             self.connection.on_error(self._on_error)
             
-            print("Starting SignalR connection...")
             # Start the connection
             start_result = self.connection.start()
             if asyncio.iscoroutine(start_result):
@@ -66,14 +64,9 @@ class SignalRAttackPathClient:
             # Wait a moment for connection to establish
             await asyncio.sleep(2)
             
-            print(f"Connection established: {self.is_connected}")
             return self.is_connected
             
         except Exception as e:
-            print(f"Failed to connect to SignalR hub: {str(e)}")
-            print(f"Exception type: {type(e).__name__}")
-            import traceback
-            print(f"Traceback: {traceback.format_exc()}")
             return False
     
     async def disconnect(self):
@@ -117,25 +110,10 @@ class SignalRAttackPathClient:
                             content = summary_message.get("Content", "")
                             if content.strip():  # Only add non-empty content
                                 self.streaming_results.append(summary_message)
-                                print(f"✅ Added streaming content ({len(content)} chars): {content[:100]}...")
-                            
-                            # Check for finish reason
-                            finish_reason = summary_message.get("FinishReason")
-                            if finish_reason:
-                                print(f"🏁 Received finish reason: {finish_reason}")
-                        else:
-                            print(f"⚠️ SummaryMessage missing expected fields. Keys: {list(summary_message.keys())}")
-                    else:
-                        print(f"⚠️ Message doesn't contain SummaryMessage. Keys: {list(parsed_message.keys()) if isinstance(parsed_message, dict) else 'Not a dict'}")
-                else:
-                    print(f"⚠️ List item is not a string: {type(json_string)}")
-            else:
-                print(f"⚠️ Message is not a list or is empty: {type(message)}")
                 
-        except Exception as e:
-            print(f"Error handling QueryResult: {str(e)}")
-            import traceback
-            print(f"Traceback: {traceback.format_exc()}")
+        except Exception:
+            # Silently ignore parsing errors
+            pass
     
     async def get_attack_path_summary(self, summary_parameters: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Call the GetAttackPathSummary method and collect streaming results."""
@@ -147,16 +125,12 @@ class SignalRAttackPathClient:
         self.current_summary_id = summary_parameters.get("SummaryId", str(uuid.uuid4()))
         
         try:
-            print(f"Sending GetAttackPathSummary request with SummaryId: {self.current_summary_id}")
-            
             # Invoke the GetAttackPathSummary method
             send_result = self.connection.send("GetAttackPathSummary", [summary_parameters])
             
             # Handle the send result properly - don't await it if it's not a coroutine
             if asyncio.iscoroutine(send_result):
                 await send_result
-            
-            print("Request sent, waiting for streaming results...")
             
             # Wait for streaming results to complete
             # We'll wait up to 60 seconds for the LLM to finish streaming
@@ -176,21 +150,14 @@ class SignalRAttackPathClient:
                     stable_count += 1
                     # If no new results for 5 seconds, assume streaming is complete
                     if stable_count >= 10:  # 10 * 0.5s = 5 seconds
-                        print(f"No new results for 5 seconds, assuming complete. Total messages: {current_count}")
                         break
                 else:
                     stable_count = 0
                     last_result_count = current_count
-                    print(f"Received {current_count} messages so far...")
             
-            print(f"Streaming completed with {len(self.streaming_results)} total messages")
             return self.streaming_results.copy()
             
         except Exception as e:
-            print(f"Exception in get_attack_path_summary: {str(e)}")
-            print(f"Exception type: {type(e).__name__}")
-            import traceback
-            print(f"Traceback: {traceback.format_exc()}")
             raise Exception(f"Failed to get attack path summary: {str(e)}")
 
 
@@ -434,8 +401,7 @@ class AttackPathsMCPServer:
         return {
             "content": full_content,
             "finish_reason": finish_reason,
-            "total_chunks": len(streaming_results),
-            "raw_messages": streaming_results
+            "total_chunks": len(streaming_results)
         }
     
     def _extract_attack_path_info(self, attack_path_data: Dict[str, Any]) -> Dict[str, Any]:
