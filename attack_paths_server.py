@@ -99,19 +99,43 @@ class SignalRAttackPathClient:
     def _handle_query_result(self, message):
         """Handle incoming QueryResult messages from the hub."""
         try:
-            # Parse the JSON message
-            if isinstance(message, str):
-                parsed_message = json.loads(message)
+            # Handle the message format: it's a list containing a JSON string
+            if isinstance(message, list) and len(message) > 0:
+                # Extract the JSON string from the list
+                json_string = message[0]
+                if isinstance(json_string, str):
+                    # Parse the JSON string
+                    parsed_message = json.loads(json_string)
+                    
+                    # Extract the SummaryMessage from the parsed structure
+                    if isinstance(parsed_message, dict) and "SummaryMessage" in parsed_message:
+                        summary_message = parsed_message["SummaryMessage"]
+                        
+                        # Check if this has the expected fields
+                        if "AttackPathId" in summary_message and "Content" in summary_message:
+                            # Only add messages with actual content (not empty strings)
+                            content = summary_message.get("Content", "")
+                            if content.strip():  # Only add non-empty content
+                                self.streaming_results.append(summary_message)
+                                print(f"✅ Added streaming content ({len(content)} chars): {content[:100]}...")
+                            
+                            # Check for finish reason
+                            finish_reason = summary_message.get("FinishReason")
+                            if finish_reason:
+                                print(f"🏁 Received finish reason: {finish_reason}")
+                        else:
+                            print(f"⚠️ SummaryMessage missing expected fields. Keys: {list(summary_message.keys())}")
+                    else:
+                        print(f"⚠️ Message doesn't contain SummaryMessage. Keys: {list(parsed_message.keys()) if isinstance(parsed_message, dict) else 'Not a dict'}")
+                else:
+                    print(f"⚠️ List item is not a string: {type(json_string)}")
             else:
-                parsed_message = message
-            
-            # Check if this is an AttackPathSummaryResponse
-            if "AttackPathId" in parsed_message and "Content" in parsed_message:
-                self.streaming_results.append(parsed_message)
-                print(f"Received streaming content: {parsed_message.get('Content', '')[:100]}...")
+                print(f"⚠️ Message is not a list or is empty: {type(message)}")
                 
         except Exception as e:
             print(f"Error handling QueryResult: {str(e)}")
+            import traceback
+            print(f"Traceback: {traceback.format_exc()}")
     
     async def get_attack_path_summary(self, summary_parameters: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Call the GetAttackPathSummary method and collect streaming results."""
