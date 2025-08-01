@@ -7,6 +7,7 @@ import json
 import uuid
 import sys
 import argparse
+from raptor_utils import RaptorAPIClient
 
 # SignalR client imports
 try:
@@ -35,38 +36,44 @@ class SignalRAttackPathClient:
             raise ImportError("signalrcore package is required for SignalR functionality. Install with: pip install signalrcore")
         
         try:
+            # Build the connection URL with access token as query parameter
+            connection_url = f"{self.hub_url}?access_token={self.access_token}"
+            print(f"Connecting to: {connection_url}")
+            
             # Build the connection with authentication
             self.connection = HubConnectionBuilder() \
-                .with_url(self.hub_url, options={
-                    "access_token_factory": lambda: self.access_token,
-                    "headers": {
-                        "Authorization": f"Bearer {self.access_token}"
-                    }
-                }) \
+                .with_url(connection_url) \
                 .with_automatic_reconnect({
                     "type": "raw",
                     "keep_alive_interval": 10,
                     "reconnect_interval": 5,
-                    "max_attempts": 5
+                    "max_attempts": 3
                 }) \
                 .build()
             
             # Register event handlers
             self.connection.on("QueryResult", self._handle_query_result)
-            self.connection.on_open(lambda: self._on_connected())
-            self.connection.on_close(lambda: self._on_disconnected())
-            self.connection.on_error(lambda data: self._on_error(data))
+            self.connection.on_open(self._on_connected)
+            self.connection.on_close(self._on_disconnected)
+            self.connection.on_error(self._on_error)
             
+            print("Starting SignalR connection...")
             # Start the connection
-            await self.connection.start()
+            start_result = self.connection.start()
+            if asyncio.iscoroutine(start_result):
+                await start_result
             
             # Wait a moment for connection to establish
-            await asyncio.sleep(1)
+            await asyncio.sleep(2)
             
+            print(f"Connection established: {self.is_connected}")
             return self.is_connected
             
         except Exception as e:
             print(f"Failed to connect to SignalR hub: {str(e)}")
+            print(f"Exception type: {type(e).__name__}")
+            import traceback
+            print(f"Traceback: {traceback.format_exc()}")
             return False
     
     async def disconnect(self):
@@ -116,8 +123,16 @@ class SignalRAttackPathClient:
         self.current_summary_id = summary_parameters.get("SummaryId", str(uuid.uuid4()))
         
         try:
+            print(f"Sending GetAttackPathSummary request with SummaryId: {self.current_summary_id}")
+            
             # Invoke the GetAttackPathSummary method
-            await self.connection.send("GetAttackPathSummary", [summary_parameters])
+            send_result = self.connection.send("GetAttackPathSummary", [summary_parameters])
+            
+            # Handle the send result properly - don't await it if it's not a coroutine
+            if asyncio.iscoroutine(send_result):
+                await send_result
+            
+            print("Request sent, waiting for streaming results...")
             
             # Wait for streaming results to complete
             # We'll wait up to 60 seconds for the LLM to finish streaming
@@ -137,21 +152,28 @@ class SignalRAttackPathClient:
                     stable_count += 1
                     # If no new results for 5 seconds, assume streaming is complete
                     if stable_count >= 10:  # 10 * 0.5s = 5 seconds
+                        print(f"No new results for 5 seconds, assuming complete. Total messages: {current_count}")
                         break
                 else:
                     stable_count = 0
                     last_result_count = current_count
+                    print(f"Received {current_count} messages so far...")
             
+            print(f"Streaming completed with {len(self.streaming_results)} total messages")
             return self.streaming_results.copy()
             
         except Exception as e:
+            print(f"Exception in get_attack_path_summary: {str(e)}")
+            print(f"Exception type: {type(e).__name__}")
+            import traceback
+            print(f"Traceback: {traceback.format_exc()}")
             raise Exception(f"Failed to get attack path summary: {str(e)}")
 
 
 class AttackPathsMCPServer:
     """Encapsulated MCP server for Attack Path Analysis operations using SignalR."""
     
-    def __init__(self, raptor_token: Optional[str] = None, raptor_url: Optional[str] = None):
+    def __init__(self, raptor_token: Optional[str] = None, raptor_url: Optional[str] = None, hub_path: Optional[str] = None):
         name = "Attack Paths Analysis Server"
         desc = """
             This server provides structured attack path analysis through the Raptor SignalR API.
@@ -168,8 +190,13 @@ class AttackPathsMCPServer:
         # Configure SignalR connection
         self._raptor_token = raptor_token or os.getenv("RAPTOR_TOKEN")
         self._raptor_url = raptor_url or "http://localhost:5000"
-        self._hub_url = f"{self._raptor_url}/api/hub"  # Typical SignalR hub endpoint
+        self._hub_path = hub_path or "/api"  # Correct hub path
+        # Convert HTTP URL to WebSocket URL for SignalR
+        ws_url = self._raptor_url.replace("http://", "ws://").replace("https://", "wss://")
+        self._hub_url = f"{ws_url}{self._hub_path}"
         
+        # Initialize API client for determine_attack_paths call
+        self._api_client = RaptorAPIClient(f"{self._raptor_url}/v1", self._raptor_token)
         self._signalr_client = None
         self._register_tools()
     
@@ -194,32 +221,51 @@ class AttackPathsMCPServer:
         
         @self.mcp.tool()
         async def structured_attack_path_analysis(
-            attack_path_data: Dict[str, Any],
+            domain_filter: Optional[List[str]] = None,
+            zone_filter: Optional[List[str]] = None,
+            zero_cost_paths: bool = False,
+            include_blowout_paths: bool = True,
+            return_principals_only: bool = True,
+            zero_cost_only: bool = False,
+            blowout_paths: int = 250,
+            attacker_oid: str = "",
+            target_oid: str = "",
             summary_id: Optional[str] = None,
             force_refresh: bool = False
         ) -> Dict[str, Any]:
             """
-            **Role**: Performs comprehensive structured analysis of a specific attack path with AI-powered summaries
+            **Role**: Performs comprehensive structured analysis of attack paths with AI-powered summaries
             
-            This tool connects to the SignalR hub to stream real-time LLM-generated summaries of attack path data.
+            This tool first calls determine_attack_paths to get attack path data, then takes the first attack path
+            and connects to the SignalR hub to stream real-time LLM-generated summaries of that attack path.
             It provides detailed, human-readable analysis of complex attack paths to help security analysts
             understand the implications and steps involved in potential security breaches.
             
             **Inputs**:
-            - attack_path_data: Complete attack path data structure containing:
-              - Id: Numeric identifier of the attack path
-              - Target: VertexProperties of the target node (id, type, label, domain, zone, etc.)
-              - Source: VertexProperties of the source node  
-              - Cost: Double representing the attack cost/difficulty
-              - RiskScore: Double representing the risk assessment
-              - Path: GraphData containing the complete attack path with:
-                - nodes: Collection of VertexProperties for all objects in the path
-                - links: Collection of EdgeProperties for all relationships in the path
-              - Blowout: String indicating if path analysis was terminated due to complexity
+            - domain_filter: List of Active Directory domain names to include in analysis. When provided, 
+              only objects from these domains will be considered. If None, all domains are included.
+            - zone_filter: List of security zone IDs to include in analysis. When provided, only objects 
+              from these zones will be considered. If None, all zones are included.
+            - zero_cost_paths: Boolean flag to include all zero-cost (immediate) attack paths. Default False.
+              When True, paths with no security barriers are included in the analysis.
+            - include_blowout_paths: Boolean flag to include additional path variations when complexity 
+              limit is reached. Default True. When False, only paths discovered before hitting the limit.
+            - return_principals_only: Boolean flag to analyze only paths ending at security principals. 
+              Default True. When False, paths ending at any object type are analyzed.
+            - zero_cost_only: Boolean flag to analyze only zero-cost attack paths. Default False. 
+              When True, only immediate attack vectors are analyzed.
+            - blowout_paths: Maximum number of attack paths to analyze before stopping. Default 250. 
+              Prevents excessive computation for complex environments.
+            - attacker_oid: Object identifier of the starting point for attack simulation. When provided, 
+              only paths from this specific object are analyzed. If empty, all potential attackers considered.
+            - target_oid: Object identifier of the attack target. When provided, only paths to this 
+              specific object are analyzed. If empty, all Tier 0 assets are considered targets.
             - summary_id: Optional unique identifier for the summary request. If not provided, one will be generated.
             - force_refresh: Boolean flag to force a refresh of the summary even if cached. Default False.
             
             **Outputs**:
+            - attack_paths_response: The full response from determine_attack_paths call
+            - first_attack_path: The first attack path that was analyzed
             - streaming_summary: Complete LLM-generated summary content assembled from streaming responses
             - summary_metadata: Metadata about the summary including timing and message count
             - attack_path_info: Processed information about the attack path being analyzed
@@ -229,45 +275,79 @@ class AttackPathsMCPServer:
             if not SIGNALR_AVAILABLE:
                 return {
                     "error": "SignalR functionality not available. Please install signalrcore: pip install signalrcore",
+                    "attack_paths_response": None,
+                    "first_attack_path": None,
                     "streaming_summary": None,
                     "summary_metadata": None,
                     "attack_path_info": None,
                     "analysis_completed": False
                 }
-            
-            # Validate required attack path data
-            if not attack_path_data:
-                return {
-                    "error": "attack_path_data is required",
-                    "streaming_summary": None,
-                    "summary_metadata": None,
-                    "attack_path_info": None,
-                    "analysis_completed": False
-                }
-            
-            # Generate summary ID if not provided
-            if not summary_id:
-                summary_id = str(uuid.uuid4())
-            
-            # Build the SummaryParameters structure
-            summary_parameters = {
-                "SummaryId": summary_id,
-                "SummaryAttackPath": attack_path_data,
-                "ForceRefresh": force_refresh
-            }
             
             try:
-                # Get SignalR client and connect
+                # Step 1: Call determine_attack_paths to get attack path data
+                attack_path_params = self._build_attack_path_params(
+                    domain_filter, zone_filter, zero_cost_paths, include_blowout_paths,
+                    return_principals_only, zero_cost_only, blowout_paths, attacker_oid, target_oid
+                )
+                
+                attack_paths_response = self._api_client.call("DetermineAttackPaths", attack_path_params)
+                
+                # Check for API errors
+                if "error" in attack_paths_response:
+                    return {
+                        "error": f"Failed to determine attack paths: {attack_paths_response['error']}",
+                        "attack_paths_response": attack_paths_response,
+                        "first_attack_path": None,
+                        "streaming_summary": None,
+                        "summary_metadata": None,
+                        "attack_path_info": None,
+                        "analysis_completed": False
+                    }
+                
+                # Extract attack paths from response
+                response_data = attack_paths_response.get("response", {})
+                attack_paths = response_data.get("AttackPaths", [])
+                
+                # Check if zero_cost_paths was requested and use appropriate field
+                if zero_cost_paths and "ZeroCostAttackPaths" in response_data:
+                    attack_paths = response_data.get("ZeroCostAttackPaths", [])
+                
+                if not attack_paths:
+                    return {
+                        "error": "No attack paths found in the response",
+                        "attack_paths_response": attack_paths_response,
+                        "first_attack_path": None,
+                        "streaming_summary": None,
+                        "summary_metadata": None,
+                        "attack_path_info": None,
+                        "analysis_completed": False
+                    }
+                
+                # Step 2: Take the first attack path for summary analysis
+                first_attack_path = attack_paths[0]
+                
+                # Generate summary ID if not provided
+                if not summary_id:
+                    summary_id = str(uuid.uuid4())
+                
+                # Build the SummaryParameters structure
+                summary_parameters = {
+                    "SummaryId": summary_id,
+                    "SummaryAttackPath": first_attack_path,
+                    "ForceRefresh": force_refresh
+                }
+                
+                # Step 3: Get SignalR client and connect
                 signalr_client = await self._get_signalr_client()
                 
-                # Request attack path summary
+                # Step 4: Request attack path summary
                 streaming_results = await signalr_client.get_attack_path_summary(summary_parameters)
                 
                 # Process the streaming results
                 summary_content = self._process_streaming_results(streaming_results)
                 
                 # Extract attack path information for context
-                attack_path_info = self._extract_attack_path_info(attack_path_data)
+                attack_path_info = self._extract_attack_path_info(first_attack_path)
                 
                 # Build metadata
                 summary_metadata = {
@@ -275,10 +355,14 @@ class AttackPathsMCPServer:
                     "timestamp": datetime.datetime.now().isoformat(),
                     "message_count": len(streaming_results),
                     "force_refresh": force_refresh,
-                    "streaming_completed": True
+                    "streaming_completed": True,
+                    "total_attack_paths_found": len(attack_paths),
+                    "analyzed_path_index": 0
                 }
                 
                 return {
+                    "attack_paths_response": attack_paths_response,
+                    "first_attack_path": first_attack_path,
                     "streaming_summary": summary_content,
                     "summary_metadata": summary_metadata,
                     "attack_path_info": attack_path_info,
@@ -287,15 +371,17 @@ class AttackPathsMCPServer:
                 
             except Exception as e:
                 return {
-                    "error": f"Failed to get attack path summary: {str(e)}",
+                    "error": f"Failed to complete attack path analysis: {str(e)}",
+                    "attack_paths_response": None,
+                    "first_attack_path": None,
                     "streaming_summary": None,
                     "summary_metadata": {
-                        "summary_id": summary_id,
+                        "summary_id": summary_id if 'summary_id' in locals() else None,
                         "timestamp": datetime.datetime.now().isoformat(),
                         "error": str(e),
                         "streaming_completed": False
                     },
-                    "attack_path_info": self._extract_attack_path_info(attack_path_data) if attack_path_data else None,
+                    "attack_path_info": None,
                     "analysis_completed": False
                 }
     
@@ -377,6 +463,32 @@ class AttackPathsMCPServer:
         
         return info
     
+    def _build_attack_path_params(self, domain_filter: Optional[List[str]], 
+                                 zone_filter: Optional[List[str]], 
+                                 zero_cost_paths: bool,
+                                 include_blowout_paths: bool,
+                                 return_principals_only: bool,
+                                 zero_cost_only: bool,
+                                 blowout_paths: int,
+                                 attacker_oid: str,
+                                 target_oid: str) -> Dict[str, Any]:
+        """Build parameters for attack path-related API calls."""
+        params = {}
+        if domain_filter is not None:
+            params["DomainFilter"] = domain_filter
+        if zone_filter is not None:
+            params["ZoneFilter"] = zone_filter
+        params["ZeroCostPaths"] = zero_cost_paths
+        params["IncludeBlowoutPaths"] = include_blowout_paths
+        params["ReturnPrincipalsOnly"] = return_principals_only
+        params["ZeroCostOnly"] = zero_cost_only
+        params["BlowoutPaths"] = blowout_paths
+        if attacker_oid:
+            params["AttackerID"] = attacker_oid
+        if target_oid:
+            params["TargetID"] = target_oid
+        return params
+    
     def run(self, transport: str = 'streamable-http', host: str = '127.0.0.1', port: int = 8001, path: str = '/mcp') -> None:
         """Run the MCP server with HTTP transport.
         
@@ -406,7 +518,7 @@ if __name__ == "__main__":
     parser.add_argument("-raptor_token", type=str, default=None, help="Override RAPTOR_TOKEN for API access")
     parser.add_argument("-raptor_url", type=str, default="http://localhost:5000", help="Override RAPTOR_URL for SignalR hub access")
     parser.add_argument("-host", type=str, default="127.0.0.1", help="Host to bind the server to (default: 127.0.0.1)")
-    parser.add_argument("-port", type=int, default=8001, help="Port to bind the server to (default: 8001)")
+    parser.add_argument("-port", type=int, default=8003, help="Port to bind the server to (default: 8003)")
     parser.add_argument("-path", type=str, default="/mcp", help="URL path for the MCP endpoint (default: /mcp)")
     args = parser.parse_args()
 
