@@ -387,16 +387,20 @@ class AttackPathsMCPServer:
         
         # Combine all content chunks
         full_content = ""
-        finish_reason = "unknown"
+        finish_reason = "completed"  # Default to completed if we have results
         
         for result in streaming_results:
             content = result.get("Content", "")
             if content:
                 full_content += content
             
-            # Check for finish reason in the last message
+            # Check for finish reason in any message (not just the last one)
             if result.get("FinishReason"):
                 finish_reason = result.get("FinishReason")
+        
+        # If we have content but no explicit finish reason, assume it completed successfully
+        if full_content and finish_reason == "completed":
+            finish_reason = "stop"  # Standard completion reason
         
         return {
             "content": full_content,
