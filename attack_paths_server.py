@@ -7,6 +7,7 @@ import json
 import uuid
 import sys
 import argparse
+import urllib.parse
 from raptor_utils import RaptorAPIClient
 
 # SignalR client imports
@@ -36,8 +37,9 @@ class SignalRAttackPathClient:
             raise ImportError("signalrcore package is required for SignalR functionality. Install with: pip install signalrcore")
         
         try:
-            # Build the connection URL with access token as query parameter
-            connection_url = f"{self.hub_url}?access_token={self.access_token}"
+            # Build the connection URL with properly encoded access token as query parameter
+            encoded_token = urllib.parse.quote(self.access_token)
+            connection_url = f"{self.hub_url}?access_token={encoded_token}"
             
             # Build the connection with authentication
             self.connection = HubConnectionBuilder() \
