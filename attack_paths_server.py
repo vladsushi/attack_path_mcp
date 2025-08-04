@@ -56,30 +56,31 @@ class AttackPathsMCPServer:
             attack_path_id: Optional[str | int] = None
         ) -> Dict[str, Any]:
             """
-            **Role**: AI-Powered, detailed and structured analysis of a specific attack path
+            Performs comprehensive and structured AI-powered analysis of attack paths between source and target objects.
             
-            This tool analyzes attack paths between a source and target. It handles three scenarios:
-            1. No paths found: Returns error
-            2. Single path found: Automatically analyzes it with AI summary
-            3. Multiple paths found: Returns raw attack path information and an invitation to specify attack_path_id, unless the latter is already specified.
+            **Parameters**:
+            - source_oid (required): Object identifier of the attack source
+            - target_oid (required): Object identifier of the attack target
+            - attack_path_id (optional): Specific attack path ID when multiple paths exist
             
-            **Inputs**:
-            - source_oid: REQUIRED. Object identifier of the attack source.
-            - target_oid: REQUIRED. Object identifier of the attack target.
-            - attack_path_id: OPTIONAL. Specific attack path ID to analyze when multiple paths exist.
+            **Behavior**:
+            • Single path found: Automatically generates structured AI analysis
+            • Multiple paths found: Returns raw attack path data with selection prompt
+            • Specific path requested: Analyzes the selected attack path by ID
+            • No paths found: Returns descriptive error
             
-            **Outputs**:
-            When single path or specific path selected:
-            - attack_path_analysis: Complete LLM-generated summary content
+            **Analysis Output Format**:
+            The AI analysis provides structured JSON containing:
+            - Objects: Detailed descriptions of entities in the attack path
+            - Relationships: Security-relevant connections and permissions
+            - KeyPointsOfConcern: Critical security issues and risks identified
+            - Conclusion: Executive summary with remediation recommendations
             
-            When multiple paths found (no attack_path_id provided):
-            - attack_paths_response: Full response with all available attack paths
-            - message: Instructions to select specific attack path ID and rerun
-            
-            **Error Conditions**:
-            - Returns error if source_oid or target_oid are not provided
-            - Returns error if no attack path exists between the specified nodes
-            - Returns error if attack_path_id specified but not found in results
+            **Response Types**:
+            - attack_path_analysis: Complete structured analysis (JSON string)
+            - attack_paths_response: Raw API response with all available paths
+            - message: User guidance for path selection
+            - error: Detailed error description with available options
             """
             
             if not SIGNALR_AVAILABLE:
