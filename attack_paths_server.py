@@ -8,7 +8,7 @@ import uuid
 import sys
 import argparse
 import urllib.parse
-from raptor_utils import RaptorAPIClient
+from attack_paths_utils import RaptorAPIClient
 
 # SignalR client imports
 try:
