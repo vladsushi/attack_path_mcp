@@ -218,128 +218,72 @@ class AttackPathsMCPServer:
             target_oid: str,
             domain_filter: Optional[List[str]] = None,
             zone_filter: Optional[List[str]] = None,
-            zero_cost_paths: bool = False,
-            include_blowout_paths: bool = True,
-            return_principals_only: bool = True,
             zero_cost_only: bool = False,
-            blowout_paths: int = 250,
             summary_id: Optional[str] = None,
             force_refresh: bool = False
         ) -> Dict[str, Any]:
             """
             **Role**: Performs structured analysis of ONE SPECIFIC attack path with AI-powered summaries
             
-            This tool requires specific attacker and target OIDs to unambiguously identify a single attack path.
-            It calls determine_attack_paths with these parameters and expects exactly ONE attack path in return.
-            If 0 or >1 attack paths are found, the tool returns an error. The single attack path is then sent
-            to the SignalR hub for real-time LLM-generated summary analysis.
+            This tool requires specific attacker and target OIDs to identify a single attack path.
+            In most cases, these two OIDs should be sufficient to uniquely identify one path.
+            If multiple paths exist, you can use the optional filters to narrow down to exactly one.
             
             **Inputs**:
-            - attacker_oid: REQUIRED. Object identifier of the attack source. This must be provided to 
-              unambiguously identify the starting point of the specific attack path to analyze.
-            - target_oid: REQUIRED. Object identifier of the attack target. This must be provided to 
-              unambiguously identify the ending point of the specific attack path to analyze.
-            - domain_filter: Optional list of Active Directory domain names to include in analysis. 
-              Used to further narrow the search if needed.
-            - zone_filter: Optional list of security zone IDs to include in analysis. 
-              Used to further narrow the search if needed.
-            - zero_cost_paths: Boolean flag to include zero-cost (immediate) attack paths. Default False.
-            - include_blowout_paths: Boolean flag to include additional path variations when complexity 
-              limit is reached. Default True.
-            - return_principals_only: Boolean flag to analyze only paths ending at security principals. 
-              Default True.
-            - zero_cost_only: Boolean flag to analyze only zero-cost attack paths. Default False.
-            - blowout_paths: Maximum number of attack paths to analyze before stopping. Default 250.
-            - summary_id: Optional unique identifier for the summary request. If not provided, one will be generated.
-            - force_refresh: Boolean flag to force a refresh of the summary even if cached. Default False.
+            - attacker_oid: REQUIRED. Object identifier of the attack source.
+            - target_oid: REQUIRED. Object identifier of the attack target.
+            - domain_filter: Optional list of domain names to narrow the search if multiple paths exist.
+            - zone_filter: Optional list of security zone IDs to narrow the search if multiple paths exist.
+            - zero_cost_only: Optional flag to focus only on zero-cost (immediate) attack paths. Default False.
+            - summary_id: Optional unique identifier for the summary request.
+            - force_refresh: Optional flag to force a refresh of the summary even if cached. Default False.
             
             **Outputs**:
             - attack_paths_response: The full response from determine_attack_paths call
             - target_attack_path: The specific attack path that was analyzed
-            - streaming_summary: Complete LLM-generated summary content assembled from streaming responses
-            - summary_metadata: Metadata about the summary including timing and message count
-            - attack_path_info: Processed information about the attack path being analyzed
-            - analysis_completed: Boolean indicating if the analysis completed successfully
+            - streaming_summary: Complete LLM-generated summary content
+            - summary_metadata: Analysis metadata including timing and message count
+            - attack_path_info: Extracted information about the attack path
+            - analysis_completed: Boolean indicating successful completion
             
             **Error Conditions**:
             - Returns error if attacker_oid or target_oid are not provided
-            - Returns error if determine_attack_paths returns 0 attack paths (no path found)
-            - Returns error if determine_attack_paths returns >1 attack paths (ambiguous specification)
+            - Returns error if no attack path exists between the specified nodes
+            - Returns error if multiple attack paths exist (suggests using filters to narrow down)
             """
             
             if not SIGNALR_AVAILABLE:
-                return {
-                    "error": "SignalR functionality not available. Please install signalrcore: pip install signalrcore",
-                    "attack_paths_response": None,
-                    "first_attack_path": None,
-                    "streaming_summary": None,
-                    "summary_metadata": None,
-                    "attack_path_info": None,
-                    "analysis_completed": False
-                }
+                return {"error": "SignalR functionality not available. Please install signalrcore: pip install signalrcore"}
             
             # Validate required parameters
             if not attacker_oid or not target_oid:
-                return {
-                    "error": "Both attacker_oid and target_oid are required to unambiguously identify a specific attack path",
-                    "attack_paths_response": None,
-                    "target_attack_path": None,
-                    "streaming_summary": None,
-                    "summary_metadata": None,
-                    "attack_path_info": None,
-                    "analysis_completed": False
-                }
+                return {"error": "Both attacker_oid and target_oid are required to identify a specific attack path"}
             
             try:
                 # Step 1: Call determine_attack_paths to get attack path data
                 attack_path_params = self._build_attack_path_params(
-                    domain_filter, zone_filter, zero_cost_paths, include_blowout_paths,
-                    return_principals_only, zero_cost_only, blowout_paths, attacker_oid, target_oid
+                    domain_filter, zone_filter, zero_cost_only, attacker_oid, target_oid
                 )
                 
                 attack_paths_response = self._api_client.call("DetermineAttackPaths", attack_path_params)
                 
                 # Check for API errors
                 if "error" in attack_paths_response:
-                    return {
-                        "error": f"Failed to determine attack paths: {attack_paths_response['error']}",
-                        "attack_paths_response": attack_paths_response,
-                        "target_attack_path": None,
-                        "streaming_summary": None,
-                        "summary_metadata": None,
-                        "attack_path_info": None,
-                        "analysis_completed": False
-                    }
+                    return {"error": f"Failed to determine attack paths: {attack_paths_response['error']}"}
                 
                 # Extract attack paths from response
                 response_data = attack_paths_response.get("response", {})
                 attack_paths = response_data.get("AttackPaths", [])
                 
-                # Check if zero_cost_paths was requested and use appropriate field
-                if zero_cost_paths and "ZeroCostAttackPaths" in response_data:
+                # Check if zero_cost_only was requested and use appropriate field
+                if zero_cost_only and "ZeroCostAttackPaths" in response_data:
                     attack_paths = response_data.get("ZeroCostAttackPaths", [])
                 
                 # Step 2: Validate that exactly ONE attack path was found
                 if len(attack_paths) == 0:
-                    return {
-                        "error": f"No attack path found between attacker_oid '{attacker_oid}' and target_oid '{target_oid}'. The specified path may not exist or may be filtered out by the provided parameters.",
-                        "attack_paths_response": attack_paths_response,
-                        "target_attack_path": None,
-                        "streaming_summary": None,
-                        "summary_metadata": None,
-                        "attack_path_info": None,
-                        "analysis_completed": False
-                    }
+                    return {"error": f"No attack path found between '{attacker_oid}' and '{target_oid}'"}
                 elif len(attack_paths) > 1:
-                    return {
-                        "error": f"Multiple attack paths found ({len(attack_paths)} paths) between attacker_oid '{attacker_oid}' and target_oid '{target_oid}'. The specification is ambiguous. Please use additional filters (domain_filter, zone_filter, etc.) to narrow down to exactly one path.",
-                        "attack_paths_response": attack_paths_response,
-                        "target_attack_path": None,
-                        "streaming_summary": None,
-                        "summary_metadata": None,
-                        "attack_path_info": None,
-                        "analysis_completed": False
-                    }
+                    return {"error": f"Multiple attack paths found ({len(attack_paths)} paths). Use domain_filter or zone_filter to narrow down to exactly one path"}
                 
                 # Step 3: We have exactly one attack path - proceed with analysis
                 target_attack_path = attack_paths[0]
@@ -381,29 +325,11 @@ class AttackPathsMCPServer:
                 }
                 
                 return {
-                    "attack_paths_response": attack_paths_response,
-                    "target_attack_path": target_attack_path,
-                    "streaming_summary": summary_content,
-                    "summary_metadata": summary_metadata,
-                    "attack_path_info": attack_path_info,
-                    "analysis_completed": True
+                    "detailed_attack_path_analysis": summary_content["content"]
                 }
                 
             except Exception as e:
-                return {
-                    "error": f"Failed to complete attack path analysis: {str(e)}",
-                    "attack_paths_response": None,
-                    "target_attack_path": None,
-                    "streaming_summary": None,
-                    "summary_metadata": {
-                        "summary_id": summary_id if 'summary_id' in locals() else None,
-                        "timestamp": datetime.datetime.now().isoformat(),
-                        "error": str(e),
-                        "streaming_completed": False
-                    },
-                    "attack_path_info": None,
-                    "analysis_completed": False
-                }
+                return {"error": f"Failed to complete attack path analysis: {str(e)}"}
     
     def _process_streaming_results(self, streaming_results: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Process the streaming results from SignalR into a structured summary."""
@@ -488,11 +414,7 @@ class AttackPathsMCPServer:
     
     def _build_attack_path_params(self, domain_filter: Optional[List[str]], 
                                  zone_filter: Optional[List[str]], 
-                                 zero_cost_paths: bool,
-                                 include_blowout_paths: bool,
-                                 return_principals_only: bool,
                                  zero_cost_only: bool,
-                                 blowout_paths: int,
                                  attacker_oid: str,
                                  target_oid: str) -> Dict[str, Any]:
         """Build parameters for attack path-related API calls."""
@@ -501,11 +423,14 @@ class AttackPathsMCPServer:
             params["DomainFilter"] = domain_filter
         if zone_filter is not None:
             params["ZoneFilter"] = zone_filter
-        params["ZeroCostPaths"] = zero_cost_paths
-        params["IncludeBlowoutPaths"] = include_blowout_paths
-        params["ReturnPrincipalsOnly"] = return_principals_only
+        
+        # Set reasonable defaults for the other parameters
+        params["ZeroCostPaths"] = False  # We'll use ZeroCostOnly instead
+        params["IncludeBlowoutPaths"] = True
+        params["ReturnPrincipalsOnly"] = True
         params["ZeroCostOnly"] = zero_cost_only
-        params["BlowoutPaths"] = blowout_paths
+        params["BlowoutPaths"] = 250
+        
         if attacker_oid:
             params["AttackerID"] = attacker_oid
         if target_oid:
