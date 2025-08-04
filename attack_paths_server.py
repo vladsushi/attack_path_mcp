@@ -4,7 +4,7 @@ import datetime
 import uuid
 import argparse
 from fastmcp import FastMCP
-from attack_paths_utils import RaptorAPIClient, SignalRAttackPathClient, SIGNALR_AVAILABLE
+from attack_paths_utils import RaptorAPIClient, SignalRAttackPathClient
 
 
 class AttackPathsMCPServer:
@@ -82,9 +82,6 @@ class AttackPathsMCPServer:
             - message: User guidance for path selection
             - error: Detailed error description with available options
             """
-            
-            if not SIGNALR_AVAILABLE:
-                return {"error": "SignalR functionality not available. Please install signalrcore: pip install signalrcore"}
             
             # Validate required parameters
             if not source_oid or not target_oid:

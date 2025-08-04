@@ -14,11 +14,7 @@ from dotenv import load_dotenv
 load_dotenv(override=True)
 
 # SignalR client imports
-try:
-    from signalrcore.hub_connection_builder import HubConnectionBuilder
-    SIGNALR_AVAILABLE = True
-except ImportError:
-    SIGNALR_AVAILABLE = False
+from signalrcore.hub_connection_builder import HubConnectionBuilder
 
 
 class RaptorAPIClient:
@@ -58,9 +54,6 @@ class SignalRAttackPathClient:
         
     async def connect(self) -> bool:
         """Connect to the SignalR hub."""
-        if not SIGNALR_AVAILABLE:
-            raise ImportError("signalrcore package required. Install with: pip install signalrcore")
-        
         try:
             encoded_token = urllib.parse.quote(self.access_token)
             connection_url = f"{self.hub_url}?access_token={encoded_token}"
