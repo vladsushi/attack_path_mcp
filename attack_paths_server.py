@@ -214,6 +214,8 @@ class AttackPathsMCPServer:
         
         @self.mcp.tool()
         async def structured_attack_path_analysis(
+            attacker_oid: str,
+            target_oid: str,
             domain_filter: Optional[List[str]] = None,
             zone_filter: Optional[List[str]] = None,
             zero_cost_paths: bool = False,
@@ -221,48 +223,48 @@ class AttackPathsMCPServer:
             return_principals_only: bool = True,
             zero_cost_only: bool = False,
             blowout_paths: int = 250,
-            attacker_oid: str = "",
-            target_oid: str = "",
             summary_id: Optional[str] = None,
             force_refresh: bool = False
         ) -> Dict[str, Any]:
             """
-            **Role**: Performs comprehensive structured analysis of attack paths with AI-powered summaries
+            **Role**: Performs structured analysis of ONE SPECIFIC attack path with AI-powered summaries
             
-            This tool first calls determine_attack_paths to get attack path data, then takes the first attack path
-            and connects to the SignalR hub to stream real-time LLM-generated summaries of that attack path.
-            It provides detailed, human-readable analysis of complex attack paths to help security analysts
-            understand the implications and steps involved in potential security breaches.
+            This tool requires specific attacker and target OIDs to unambiguously identify a single attack path.
+            It calls determine_attack_paths with these parameters and expects exactly ONE attack path in return.
+            If 0 or >1 attack paths are found, the tool returns an error. The single attack path is then sent
+            to the SignalR hub for real-time LLM-generated summary analysis.
             
             **Inputs**:
-            - domain_filter: List of Active Directory domain names to include in analysis. When provided, 
-              only objects from these domains will be considered. If None, all domains are included.
-            - zone_filter: List of security zone IDs to include in analysis. When provided, only objects 
-              from these zones will be considered. If None, all zones are included.
-            - zero_cost_paths: Boolean flag to include all zero-cost (immediate) attack paths. Default False.
-              When True, paths with no security barriers are included in the analysis.
+            - attacker_oid: REQUIRED. Object identifier of the attack source. This must be provided to 
+              unambiguously identify the starting point of the specific attack path to analyze.
+            - target_oid: REQUIRED. Object identifier of the attack target. This must be provided to 
+              unambiguously identify the ending point of the specific attack path to analyze.
+            - domain_filter: Optional list of Active Directory domain names to include in analysis. 
+              Used to further narrow the search if needed.
+            - zone_filter: Optional list of security zone IDs to include in analysis. 
+              Used to further narrow the search if needed.
+            - zero_cost_paths: Boolean flag to include zero-cost (immediate) attack paths. Default False.
             - include_blowout_paths: Boolean flag to include additional path variations when complexity 
-              limit is reached. Default True. When False, only paths discovered before hitting the limit.
+              limit is reached. Default True.
             - return_principals_only: Boolean flag to analyze only paths ending at security principals. 
-              Default True. When False, paths ending at any object type are analyzed.
-            - zero_cost_only: Boolean flag to analyze only zero-cost attack paths. Default False. 
-              When True, only immediate attack vectors are analyzed.
-            - blowout_paths: Maximum number of attack paths to analyze before stopping. Default 250. 
-              Prevents excessive computation for complex environments.
-            - attacker_oid: Object identifier of the starting point for attack simulation. When provided, 
-              only paths from this specific object are analyzed. If empty, all potential attackers considered.
-            - target_oid: Object identifier of the attack target. When provided, only paths to this 
-              specific object are analyzed. If empty, all Tier 0 assets are considered targets.
+              Default True.
+            - zero_cost_only: Boolean flag to analyze only zero-cost attack paths. Default False.
+            - blowout_paths: Maximum number of attack paths to analyze before stopping. Default 250.
             - summary_id: Optional unique identifier for the summary request. If not provided, one will be generated.
             - force_refresh: Boolean flag to force a refresh of the summary even if cached. Default False.
             
             **Outputs**:
             - attack_paths_response: The full response from determine_attack_paths call
-            - first_attack_path: The first attack path that was analyzed
+            - target_attack_path: The specific attack path that was analyzed
             - streaming_summary: Complete LLM-generated summary content assembled from streaming responses
             - summary_metadata: Metadata about the summary including timing and message count
             - attack_path_info: Processed information about the attack path being analyzed
             - analysis_completed: Boolean indicating if the analysis completed successfully
+            
+            **Error Conditions**:
+            - Returns error if attacker_oid or target_oid are not provided
+            - Returns error if determine_attack_paths returns 0 attack paths (no path found)
+            - Returns error if determine_attack_paths returns >1 attack paths (ambiguous specification)
             """
             
             if not SIGNALR_AVAILABLE:
@@ -270,6 +272,18 @@ class AttackPathsMCPServer:
                     "error": "SignalR functionality not available. Please install signalrcore: pip install signalrcore",
                     "attack_paths_response": None,
                     "first_attack_path": None,
+                    "streaming_summary": None,
+                    "summary_metadata": None,
+                    "attack_path_info": None,
+                    "analysis_completed": False
+                }
+            
+            # Validate required parameters
+            if not attacker_oid or not target_oid:
+                return {
+                    "error": "Both attacker_oid and target_oid are required to unambiguously identify a specific attack path",
+                    "attack_paths_response": None,
+                    "target_attack_path": None,
                     "streaming_summary": None,
                     "summary_metadata": None,
                     "attack_path_info": None,
@@ -290,7 +304,7 @@ class AttackPathsMCPServer:
                     return {
                         "error": f"Failed to determine attack paths: {attack_paths_response['error']}",
                         "attack_paths_response": attack_paths_response,
-                        "first_attack_path": None,
+                        "target_attack_path": None,
                         "streaming_summary": None,
                         "summary_metadata": None,
                         "attack_path_info": None,
@@ -305,19 +319,30 @@ class AttackPathsMCPServer:
                 if zero_cost_paths and "ZeroCostAttackPaths" in response_data:
                     attack_paths = response_data.get("ZeroCostAttackPaths", [])
                 
-                if not attack_paths:
+                # Step 2: Validate that exactly ONE attack path was found
+                if len(attack_paths) == 0:
                     return {
-                        "error": "No attack paths found in the response",
+                        "error": f"No attack path found between attacker_oid '{attacker_oid}' and target_oid '{target_oid}'. The specified path may not exist or may be filtered out by the provided parameters.",
                         "attack_paths_response": attack_paths_response,
-                        "first_attack_path": None,
+                        "target_attack_path": None,
+                        "streaming_summary": None,
+                        "summary_metadata": None,
+                        "attack_path_info": None,
+                        "analysis_completed": False
+                    }
+                elif len(attack_paths) > 1:
+                    return {
+                        "error": f"Multiple attack paths found ({len(attack_paths)} paths) between attacker_oid '{attacker_oid}' and target_oid '{target_oid}'. The specification is ambiguous. Please use additional filters (domain_filter, zone_filter, etc.) to narrow down to exactly one path.",
+                        "attack_paths_response": attack_paths_response,
+                        "target_attack_path": None,
                         "streaming_summary": None,
                         "summary_metadata": None,
                         "attack_path_info": None,
                         "analysis_completed": False
                     }
                 
-                # Step 2: Take the first attack path for summary analysis
-                first_attack_path = attack_paths[0]
+                # Step 3: We have exactly one attack path - proceed with analysis
+                target_attack_path = attack_paths[0]
                 
                 # Generate summary ID if not provided
                 if not summary_id:
@@ -326,21 +351,21 @@ class AttackPathsMCPServer:
                 # Build the SummaryParameters structure
                 summary_parameters = {
                     "SummaryId": summary_id,
-                    "SummaryAttackPath": first_attack_path,
+                    "SummaryAttackPath": target_attack_path,
                     "ForceRefresh": force_refresh
                 }
                 
-                # Step 3: Get SignalR client and connect
+                # Step 4: Get SignalR client and connect
                 signalr_client = await self._get_signalr_client()
                 
-                # Step 4: Request attack path summary
+                # Step 5: Request attack path summary
                 streaming_results = await signalr_client.get_attack_path_summary(summary_parameters)
                 
                 # Process the streaming results
                 summary_content = self._process_streaming_results(streaming_results)
                 
                 # Extract attack path information for context
-                attack_path_info = self._extract_attack_path_info(first_attack_path)
+                attack_path_info = self._extract_attack_path_info(target_attack_path)
                 
                 # Build metadata
                 summary_metadata = {
@@ -350,12 +375,14 @@ class AttackPathsMCPServer:
                     "force_refresh": force_refresh,
                     "streaming_completed": True,
                     "total_attack_paths_found": len(attack_paths),
-                    "analyzed_path_index": 0
+                    "analyzed_path_index": 0,
+                    "attacker_oid": attacker_oid,
+                    "target_oid": target_oid
                 }
                 
                 return {
                     "attack_paths_response": attack_paths_response,
-                    "first_attack_path": first_attack_path,
+                    "target_attack_path": target_attack_path,
                     "streaming_summary": summary_content,
                     "summary_metadata": summary_metadata,
                     "attack_path_info": attack_path_info,
@@ -366,7 +393,7 @@ class AttackPathsMCPServer:
                 return {
                     "error": f"Failed to complete attack path analysis: {str(e)}",
                     "attack_paths_response": None,
-                    "first_attack_path": None,
+                    "target_attack_path": None,
                     "streaming_summary": None,
                     "summary_metadata": {
                         "summary_id": summary_id if 'summary_id' in locals() else None,
